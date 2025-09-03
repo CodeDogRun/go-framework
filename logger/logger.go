@@ -118,32 +118,32 @@ func (w *errorWriter) rotate() error {
 	return w.openNext()
 }
 
-func Debug(format string, v ...any) {
-	output("DEBUG", colorDebug, format, v...)
+func Debug(v ...any) {
+	output("DEBUG", colorDebug, v...)
 }
 
-func Info(format string, v ...any) {
-	output("INFO", colorInfo, format, v...)
+func Info(v ...any) {
+	output("INFO", colorInfo, v...)
 }
 
-func Success(format string, v ...any) {
-	output("SUCCESS", colorSucc, format, v...)
+func Success(v ...any) {
+	output("SUCCESS", colorSucc, v...)
 }
 
-func Warning(format string, v ...any) {
-	output("WARNING", colorWarn, format, v...)
+func Warning(v ...any) {
+	output("WARNING", colorWarn, v...)
 }
 
-func Error(format string, v ...any) {
-	output("ERROR", colorErr, format, v...)
+func Error(v ...any) {
+	output("ERROR", colorErr, v...)
 }
 
-func output(level, clr, format string, v ...any) {
+func output(level, clr string, v ...any) {
 	initLogger()
 
 	file, line := callerInfo()
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	message := fmt.Sprintf(format, v...)
+	message := fmt.Sprint(v...)
 
 	// 控制台（彩色）
 	colored := fmt.Sprintf("%s[%s] %s %s:%d - %s%s",
