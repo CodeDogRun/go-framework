@@ -26,6 +26,7 @@ var (
 func Register(value any) {
 	models = append(models, value)
 }
+
 func RegisterWithName(name string, value any) {
 	modelsWithName[name] = value
 }

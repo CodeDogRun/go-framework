@@ -51,6 +51,15 @@ func Error(c *gin.Context, code int, msg string) {
 	})
 }
 
+func ErrorWithData(c *gin.Context, code int, msg string, data any) {
+	c.AbortWithStatusJSON(http.StatusOK, Body{
+		Code:    code,
+		Msg:     msg,
+		Data:    data,
+		TraceID: getTrace(c),
+	})
+}
+
 func BindAs[T any](c *gin.Context, binder func(any) error) (T, bool) {
 	var v T
 	if err := binder(&v); err != nil {
@@ -61,6 +70,14 @@ func BindAs[T any](c *gin.Context, binder func(any) error) (T, bool) {
 	return v, true
 }
 
+func BindAsError[T any](c *gin.Context, binder func(any) error) (T, error) {
+	var v T
+	if err := binder(&v); err != nil {
+		return v, err
+	}
+	return v, nil
+}
+
 func BindInto(c *gin.Context, binder func(any) error, dst any) bool {
 	if err := binder(dst); err != nil {
 		logger.Error("表单参数解析异常: %v", err)
@@ -68,4 +85,11 @@ func BindInto(c *gin.Context, binder func(any) error, dst any) bool {
 		return false
 	}
 	return true
+}
+
+func BindIntoWithError(c *gin.Context, binder func(any) error, dst any) error {
+	if err := binder(&dst); err != nil {
+		return err
+	}
+	return nil
 }

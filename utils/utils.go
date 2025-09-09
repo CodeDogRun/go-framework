@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"io"
 	"math/big"
@@ -144,16 +145,30 @@ func TernaryIfFunc[T any](condition bool, trueValue, falseValue func() T) T {
 	return falseValue()
 }
 
-// FileMd5
-// @Description: 获取文件MD5值
-func FileMd5(filePath string) string {
+// FileHash
+// @Description: 计算文件哈希
+func FileHash(filePath string, h hash.Hash) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	hash := md5.New()
-	_, _ = io.Copy(hash, file)
-	return hex.EncodeToString(hash.Sum(nil))
+	defer file.Close()
+
+	buf := make([]byte, 4*1024*1024) // 4MB 缓冲区
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Md5EnCrypt
