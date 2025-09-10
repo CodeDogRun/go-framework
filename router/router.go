@@ -16,10 +16,10 @@ type Route struct {
 	Handlers []gin.HandlerFunc
 }
 
-var Routes []Route
+var routes []Route
 
 func AddRoute(method, path string, handlers ...gin.HandlerFunc) {
-	Routes = append(Routes, Route{Path: path, Method: strings.ToUpper(method), Handlers: handlers})
+	routes = append(routes, Route{Path: path, Method: strings.ToUpper(method), Handlers: handlers})
 }
 
 func GET(path string, handlers ...gin.HandlerFunc) {
@@ -96,7 +96,7 @@ func New() *gin.Engine {
 	engine.NoMethod(noMethod())
 
 	// HTTP 方法注册映射
-	for _, route := range Routes {
+	for _, route := range routes {
 		switch route.Method {
 		case "GET":
 			engine.GET(route.Path, route.Handlers...)
