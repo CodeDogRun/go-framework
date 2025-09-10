@@ -118,39 +118,58 @@ func (w *errorWriter) rotate() error {
 	return w.openNext()
 }
 
-func Debug(v ...any) {
-	output("DEBUG", colorDebug, v...)
+func Debug(format string, v ...any) {
+	output("DEBUG", colorReset, format, v...)
 }
 
-func Info(v ...any) {
-	output("INFO", colorInfo, v...)
+func Info(format string, v ...any) {
+	output("INFO", colorReset, format, v...)
 }
 
-func Success(v ...any) {
-	output("SUCCESS", colorSucc, v...)
+func Success(format string, v ...any) {
+	output("SUCCESS", colorReset, format, v...)
 }
 
-func Warning(v ...any) {
-	output("WARNING", colorWarn, v...)
+func Warning(format string, v ...any) {
+	output("WARNING", colorReset, format, v...)
 }
 
-func Error(v ...any) {
-	output("ERROR", colorErr, v...)
+func Error(format string, v ...any) {
+	output("ERROR", colorReset, format, v...)
 }
 
-func output(level, clr string, v ...any) {
+func DebugWithBg(format string, v ...any) {
+	output("DEBUG", colorDebug, format, v...)
+}
+
+func InfoWithBg(format string, v ...any) {
+	output("INFO", colorInfo, format, v...)
+}
+
+func SuccessWithBg(format string, v ...any) {
+	output("SUCCESS", colorSucc, format, v...)
+}
+
+func WarningWithBg(format string, v ...any) {
+	output("WARNING", colorWarn, format, v...)
+}
+
+func ErrorWithBg(format string, v ...any) {
+	output("ERROR", colorErr, format, v...)
+}
+
+func output(level, clr string, format string, v ...any) {
 	initLogger()
 
 	file, line := callerInfo()
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	message := fmt.Sprint(v...)
+	message := fmt.Sprintf(format, v...)
 
-	// 控制台（彩色）
 	colored := fmt.Sprintf("%s[%s] %s %s:%d - %s%s",
 		clr, level, timestamp, file, line, message, colorReset)
+
 	logInst.Println(colored)
 
-	// 文件（仅 ERROR 落盘；纯文本）
 	if level == "ERROR" {
 		plain := fmt.Sprintf("[%s] %s %s:%d - %s\n", level, timestamp, file, line, message)
 		errW.write(plain)
