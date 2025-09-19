@@ -265,7 +265,6 @@ func (m *Manager) waitForTun(name string, timeout time.Duration) bool {
 }
 
 func (m *Manager) writeConfig(task *Task) {
-	// 2. 删除 mihomo 配置文件目录
 	configDir := m.genConfigDir(task.IP)
 	_ = os.RemoveAll(configDir)
 	_ = os.MkdirAll(configDir, 0755)
@@ -339,7 +338,7 @@ rules:
 
 `, task.Username, task.Password, task.TunName, task.Mtu, dnsPort, dnsPort, task.TunIndex, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TableName)
 
-	logger.Info("写入代理配置信息: mixedPort[%v], TunName[%v], Address[%v], Gateway[%v], dnsPort[%v], proxyName[%v], ProxyHost[%v], ProxyPort[%v], Username[%v], Password[%v]", mixedPort, task.TunName, task.Address, task.Gateway, dnsPort, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password)
+	logger.Info("写入代理配置信息: mixedPort[%v], TunName[%v], Mtu[%v], Address[%v], Gateway[%v], dnsPort[%v], proxyName[%v], ProxyHost[%v], ProxyPort[%v], Username[%v], Password[%v]", mixedPort, task.TunName, task.Mtu, task.Address, task.Gateway, dnsPort, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password)
 
 	_ = os.WriteFile(path, []byte(content), 0644)
 }
@@ -365,6 +364,10 @@ func (m *Manager) setupRoute(task *Task) {
 	}
 	if out, err := exec.Command("ip", "route", "add", "default", "dev", task.TunName, "table", task.TableName).CombinedOutput(); err != nil {
 		logger.Error("添加策略路由失败-2: %v, 输出: %s", err, string(out))
+	}
+
+	if out, err := exec.Command("ip", "route", "flush", "cache").CombinedOutput(); err != nil {
+		logger.Error("刷新路由表: %v, 输出: %s", err, string(out))
 	}
 }
 
@@ -399,6 +402,10 @@ func (m *Manager) cleanupRoute(task *Task) {
 	}
 
 	_ = os.WriteFile("/etc/iproute2/rt_tables", []byte(content), 0644)
+
+	if out, err := exec.Command("ip", "route", "flush", "cache").CombinedOutput(); err != nil {
+		logger.Error("刷新路由表: %v, 输出: %s", err, string(out))
+	}
 
 	logger.Info("[x] 已清理策略路由: %s -> %s", task.IP, task.TableName)
 }
