@@ -29,6 +29,7 @@ type Task struct {
 	Password    string
 	TunIndex    int
 	TunName     string
+	Mtu         int
 	Address     string
 	Gateway     string
 	Cmd         *exec.Cmd
@@ -64,7 +65,7 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) Start(ip, host string, port int, user, pass string, timeoutSec int64) {
+func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, timeoutSec int64) {
 	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 		logger.Error("[-] 无效的 IP 地址: %s（必须是合法 IPv4）", ip)
 		return
@@ -104,6 +105,7 @@ func (m *Manager) Start(ip, host string, port int, user, pass string, timeoutSec
 		Password:    pass,
 		TunIndex:    tunIndex,
 		TunName:     tun,
+		Mtu:         mtu,
 		Address:     addr,
 		Gateway:     gw,
 		Ctx:         ctx,
@@ -288,7 +290,7 @@ tun:
   auto-route: false
   auto-detect-interface: false
   device: %v
-  mtu: 9000
+  mtu: %v
   dns-hijack: 
     - 0.0.0.0:%v
 
@@ -335,72 +337,7 @@ rules:
   - IP-CIDR,10.0.0.0/8,DIRECT
   - MATCH,all
 
-`, task.Username, task.Password, task.TunName, dnsPort, dnsPort, task.TunIndex, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TableName)
-
-	logger.Info("写入代理配置信息: mixedPort[%v], TunName[%v], Address[%v], Gateway[%v], dnsPort[%v], proxyName[%v], ProxyHost[%v], ProxyPort[%v], Username[%v], Password[%v]", mixedPort, task.TunName, task.Address, task.Gateway, dnsPort, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password)
-
-	_ = os.WriteFile(path, []byte(content), 0644)
-}
-
-func (m *Manager) writeConfig2(task *Task) {
-	// 2. 删除 mihomo 配置文件目录
-	configDir := m.genConfigDir(task.IP)
-	_ = os.RemoveAll(configDir)
-	_ = os.MkdirAll(configDir, 0755)
-
-	path := filepath.Join(m.genConfigDir(task.IP), "config.yaml")
-
-	mixedPort := 7890 + task.TunIndex
-	dnsPort := 1053 + task.TunIndex
-
-	content := fmt.Sprintf(`
-mode: rule
-log-level: info
-allow-lan: false
-
-tun:
-  enable: true
-  stack: system
-  auto-route: false
-  auto-detect-interface: false
-  device: %s
-  mtu: 9000
-
-dns:
-  enable: true
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.%v.1/16
-  default-nameserver:
-    - 114.114.114.114
-    - 8.8.8.8
-    - system
-  nameserver:
-    - 114.114.114.114
-    - 8.8.8.8
-    - system
-
-proxies:
-  - name: %s
-    type: socks5
-    server: %s
-    port: %d
-    username: %s
-    password: %s
-    udp: true
-
-proxy-groups:
-  - name: auto
-    type: select
-    proxies:
-      - %s
-
-rules:
-  - IP-CIDR,192.168.0.0/16,DIRECT
-  - IP-CIDR,172.16.0.0/12,DIRECT
-  - IP-CIDR,10.0.0.0/8,DIRECT
-  - MATCH,auto
-
-`, task.TunName, task.TunIndex, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TableName)
+`, task.Username, task.Password, task.TunName, task.Mtu, dnsPort, dnsPort, task.TunIndex, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TableName)
 
 	logger.Info("写入代理配置信息: mixedPort[%v], TunName[%v], Address[%v], Gateway[%v], dnsPort[%v], proxyName[%v], ProxyHost[%v], ProxyPort[%v], Username[%v], Password[%v]", mixedPort, task.TunName, task.Address, task.Gateway, dnsPort, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password)
 
@@ -431,93 +368,7 @@ func (m *Manager) setupRoute(task *Task) {
 	}
 }
 
-// 废弃
-func (m *Manager) setupRoute2(task *Task) {
-	tableLine := fmt.Sprintf("%v %s", 100+task.TunIndex, task.TableName)
-	data, err := os.ReadFile("/etc/iproute2/rt_tables")
-	if err == nil && !strings.Contains(string(data), tableLine) {
-		f, err := os.OpenFile("/etc/iproute2/rt_tables", os.O_APPEND|os.O_WRONLY, 0644)
-		if err == nil {
-			defer f.Close()
-			_, _ = f.WriteString(tableLine + "\n")
-			logger.Info("[+] 已添加路由表定义: %s", tableLine)
-		} else {
-			logger.Error("[-] 写入 rt_tables 失败: %v", err)
-		}
-	}
-
-	logger.Info("添加路由策略: %v, %v, %v", task.IP, task.TunName, task.TableName)
-
-	if out, err := exec.Command("ip", "rule", "del", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败(ip rule del): %v, 输出: [%v]", err, string(out))
-	}
-
-	if out, err := exec.Command("ip", "route", "flush", "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败(ip route flush): %v, 输出: [%v]", err, string(out))
-	}
-
-	skipNetName := "ens33"
-	if runtime.GOARCH == "arm64" {
-		skipNetName = "eth0"
-	}
-
-	if out, err := exec.Command("ip", "rule", "add", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-1: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "add", "default", "dev", task.TunName, "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-2: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "add", "10.0.0.0/8", "dev", skipNetName, "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-3: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "add", "172.16.0.0/12", "dev", skipNetName, "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-4: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "add", "192.168.0.0/16", "dev", skipNetName, "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-5: %v, 输出: %s", err, string(out))
-	}
-	//if out, err := exec.Command("ip", "route", "add", "47.108.65.114", "dev", skipNetName, "table", task.TableName).CombinedOutput(); err != nil {
-	//	logger.Error("添加策略路由失败-5: %v, 输出: %s", err, string(out))
-	//}
-}
-
 func (m *Manager) cleanupRoute(task *Task) {
-	// 删除规则和路由表项
-	if out, err := exec.Command("ip", "rule", "del", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("清理策略路由失败: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "flush", "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("清理策略路由失败: %v, 输出: %s", err, string(out))
-	}
-
-	logPath := filepath.Join("logs", fmt.Sprintf("mihomo_%s.log", strings.ReplaceAll(task.IP, ".", "-")))
-	logger.Warning("清理代理日志: %v", logPath)
-	_ = os.Remove(logPath)
-
-	// 打开文件
-	file, err := os.Open("/etc/iproute2/rt_tables")
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	// 创建 Scanner 按行读取
-	scanner := bufio.NewScanner(file)
-	content := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.Contains(line, task.TableName) {
-			content += line + "\n"
-		}
-	}
-
-	_ = os.WriteFile("/etc/iproute2/rt_tables", []byte(content), 0644)
-
-	logger.Info("[x] 已清理策略路由: %s -> %s", task.IP, task.TableName)
-}
-
-// 废弃
-func (m *Manager) cleanupRoute2(task *Task) {
 	// 删除规则和路由表项
 	if out, err := exec.Command("ip", "rule", "del", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
 		logger.Error("清理策略路由失败: %v, 输出: %s", err, string(out))
