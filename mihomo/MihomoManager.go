@@ -232,16 +232,20 @@ func (m *Manager) waitForTun(index int, timeout time.Duration) bool {
 }
 
 func (m *Manager) writeConfig(task *Task) {
+	mark := 6000 + task.TunIndex
 	device := fmt.Sprintf("tun%d", task.TunIndex)
 	tableIndex := 2000 + task.TunIndex
 	ruleIndex := 9000 + task.TunIndex
 	dnsPort := 10000 + task.TunIndex
 	content := fmt.Sprintf(`
+allow-lan: false
 mode: rule
 log-level: debug
-allow-lan: false
-find-process-mode: off
 ipv6: true
+find-process-mode: off
+routing-mark: %v
+geodata-mode: false
+geo-auto-update: false
 
 tun:
   enable: true
@@ -301,7 +305,7 @@ rules:
   - IP-CIDR,223.6.6.6/32,DIRECT
   - IP-CIDR,192.168.3.122/32,DIRECT
   - MATCH,all
-`, device, 1480, tableIndex, ruleIndex, dnsPort, dnsPort, task.TunIndex, task.TunIndex, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TunIndex)
+`, mark, device, 1480, tableIndex, ruleIndex, dnsPort, dnsPort, task.TunIndex, task.TunIndex, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TunIndex)
 
 	_ = os.WriteFile(filepath.Join(m.genConfigDir(task.Name), "config.yaml"), []byte(content), 0777)
 }
