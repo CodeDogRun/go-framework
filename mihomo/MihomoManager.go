@@ -3,6 +3,7 @@ package mihomo
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,56 +19,51 @@ import (
 	"github.com/CodeDogRun/go-framework/logger"
 )
 
+const baseDir = "/root/android-data/"
+
 // Task 单个 mihomo 实例结构
 type Task struct {
-	IP          string
-	TableName   string
-	ProxyHost   string
-	ProxyPort   int
-	Username    string
-	Password    string
-	TunIndex    int
-	TunName     string
-	Mtu         int
-	Address     string
-	Gateway     string
-	Cmd         *exec.Cmd
-	Ctx         context.Context
-	Cancel      context.CancelFunc
-	Logs        []string
-	Done        chan struct{}
-	LogLock     sync.Mutex
-	logFilePath string
-	Timeout     time.Duration
-}
-
-type TaskInfo struct {
-	IP         string
-	ProxyHost  string
-	ProxyPort  int
-	TunName    string
-	Running    bool
-	LogFile    string
-	TimeoutSec int64
+	IP        string
+	Name      string
+	ProxyHost string
+	ProxyPort int
+	Username  string
+	Password  string
+	TunIndex  int
+	Cmd       *exec.Cmd
+	Ctx       context.Context
+	Cancel    context.CancelFunc
+	Logs      []string
+	Done      chan struct{}
+	LogLock   sync.Mutex
+	logFile   *os.File
+	Timeout   time.Duration
 }
 
 type Manager struct {
 	tasks    map[string]*Task
-	usedTuns map[string]bool
+	usedTuns map[int]bool
 	lock     sync.Mutex
 }
 
 func NewManager() *Manager {
 	return &Manager{
 		tasks:    make(map[string]*Task),
-		usedTuns: make(map[string]bool),
+		usedTuns: make(map[int]bool),
 	}
 }
 
-func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, timeoutSec int64) {
+// Start name - 容器ID
+// IP - 容器内网IP
+// host - 代理主机地址
+// port - 代理端口
+// user - 代理用户名
+// pass - 代理密码
+// timeoutSec - 自动关闭时间(秒)
+func (m *Manager) Start(name, ip, host string, port int, user, pass string, timeoutSec int64) error {
 	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 		logger.Error("[-] 无效的 IP 地址: %s（必须是合法 IPv4）", ip)
-		return
+		return errors.New("无效的IP地址: " + ip)
 	}
 
 	m.lock.Lock()
@@ -76,44 +71,42 @@ func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, t
 
 	if _, exists := m.tasks[ip]; exists {
 		logger.Info("[!] 任务 %s 已存在，跳过启动", ip)
-		return
+		return errors.New("指定IP已存在运行中的代理")
 	}
 
-	tunIndex, tun, addr, gw, err := m.allocateTun()
+	tunIndex, err := m.allocateTun()
 	if err != nil {
 		logger.Error("[-] 分配 tun 失败: %v", err)
-		return
+		return err
 	}
 
+	configDir := m.genConfigDir(name)
+	os.MkdirAll(configDir, 0777)
+
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, config.GetString("baseDir")+"/mihomo-"+runtime.GOARCH, "-d", m.genConfigDir(ip))
+	cmd := exec.CommandContext(ctx, config.GetString("baseDir")+"/mihomo-"+runtime.GOARCH, "-d", configDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 
-	logPath := filepath.Join("logs", fmt.Sprintf("mihomo_%s.log", strings.ReplaceAll(ip, ".", "-")))
-	_ = os.MkdirAll("logs", 0755)
+	logPath := filepath.Join(configDir, "log.log")
 	logFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 
 	task := &Task{
-		IP:          ip,
-		TableName:   "t" + strings.ReplaceAll(ip, ".", "_"),
-		ProxyHost:   host,
-		ProxyPort:   port,
-		Username:    user,
-		Password:    pass,
-		TunIndex:    tunIndex,
-		TunName:     tun,
-		Mtu:         mtu,
-		Address:     addr,
-		Gateway:     gw,
-		Ctx:         ctx,
-		Cancel:      cancel,
-		Cmd:         cmd,
-		Done:        make(chan struct{}),
-		logFilePath: logPath,
-		Timeout:     time.Duration(timeoutSec) * time.Second,
+		IP:        ip,
+		Name:      name,
+		ProxyHost: host,
+		ProxyPort: port,
+		Username:  user,
+		Password:  pass,
+		TunIndex:  tunIndex,
+		Ctx:       ctx,
+		Cancel:    cancel,
+		Cmd:       cmd,
+		Done:      make(chan struct{}),
+		logFile:   logFile,
+		Timeout:   time.Duration(timeoutSec) * time.Second,
 	}
 
 	m.writeConfig(task)
@@ -123,8 +116,9 @@ func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, t
 
 	if err = cmd.Start(); err != nil {
 		logger.Error("[-] 启动 mihomo 失败: %v", err)
+		task.logFile.Close()
 		close(task.Done)
-		return
+		return err
 	}
 
 	// 自动停止计时器
@@ -138,6 +132,7 @@ func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, t
 
 	go func(task *Task) {
 		err = cmd.Wait()
+		task.logFile.Close()
 		close(task.Done)
 
 		if err != nil {
@@ -150,29 +145,29 @@ func (m *Manager) Start(ip, host string, port int, user, pass string, mtu int, t
 
 	m.tasks[ip] = task
 
-	// 新增：等待 tunX 被系统识别成功（限时 5 秒）
-	if !m.waitForTun(task.TunName, time.Millisecond*5000) {
-		logger.Error("[-] 等待 tun 设备 %s 超时，准备退出", task.TunName)
+	if !m.waitForTun(task.TunIndex, time.Millisecond*5000) {
+		logger.Error("[-] 等待 tun 设备 %s 超时，准备退出", task.TunIndex)
 		m.Stop(task.IP)
-		return
+		return errors.New("等待TUN网卡创建超时")
 	}
 
 	m.setupRoute(task)
-	logger.Success("[+] 启动 mihomo [%s] 通过 %s:%d -> %s", ip, host, port, tun)
+	logger.Success("[+] 启动 mihomo [%s] 通过 %s:%d -> %s", ip, host, port, task.TunIndex)
+	return nil
 }
 
 // Stop 停止任务
-func (m *Manager) Stop(id string) {
+func (m *Manager) Stop(ip string) {
 	m.lock.Lock()
-	task, ok := m.tasks[id]
+	task, ok := m.tasks[ip]
 	m.lock.Unlock()
 
 	if !ok {
-		logger.Error("[!] 未找到任务: %s", id)
+		logger.Error("[!] 未找到任务: %s", ip)
 		return
 	}
 
-	logger.Warning("[x] 停止任务 %s...", id)
+	logger.Warning("[x] 停止任务 %s...", ip)
 
 	task.Cancel()
 	if task.Cmd != nil && task.Cmd.Process != nil {
@@ -181,42 +176,16 @@ func (m *Manager) Stop(id string) {
 		}
 	}
 
-	// 1. 清理路由策略
 	m.cleanupRoute(task)
 
-	// 2. 删除 mihomo 配置文件目录
-	configDir := m.genConfigDir(task.IP)
-	if err := os.RemoveAll(configDir); err != nil {
-		logger.Warning("[-] 删除配置目录失败: %s -> %v", configDir, err)
-	} else {
-		logger.Info("[✔] 配置目录已清理: %s", configDir)
-	}
-
+	task.logFile.Close()
 	<-task.Done
 
 	m.lock.Lock()
-	delete(m.tasks, id)
-	delete(m.usedTuns, task.TunName)
+	delete(m.tasks, ip)
+	delete(m.usedTuns, task.TunIndex)
 	m.lock.Unlock()
-	logger.Info("[✔] 任务 %s 已停止并清理", id)
-}
-
-func (m *Manager) List() []TaskInfo {
-	m.lock.Lock()
-	list := make([]TaskInfo, 0, len(m.tasks))
-	for _, t := range m.tasks {
-		list = append(list, TaskInfo{
-			IP:         t.IP,
-			ProxyHost:  t.ProxyHost,
-			ProxyPort:  t.ProxyPort,
-			TunName:    t.TunName,
-			Running:    true,
-			LogFile:    t.logFilePath,
-			TimeoutSec: int64(t.Timeout.Seconds()),
-		})
-	}
-	m.lock.Unlock()
-	return list
+	logger.Info("[✔] 任务 %s 已停止并清理", ip)
 }
 
 // StopAll 停止所有任务
@@ -233,63 +202,57 @@ func (m *Manager) StopAll() {
 	}
 }
 
-func (m *Manager) allocateTun() (int, string, string, string, error) {
+func (m *Manager) allocateTun() (int, error) {
 	for i := 0; i < 255; i++ {
-		tun := fmt.Sprintf("tun%d", i)
-		if !m.usedTuns[tun] {
-			addr := fmt.Sprintf("10.10.%d.2/30", i)
-			gw := fmt.Sprintf("10.10.%d.1", i)
-			m.usedTuns[tun] = true
-			return i, tun, addr, gw, nil
+		if !m.usedTuns[i] {
+			m.usedTuns[i] = true
+			return i, nil
 		}
 	}
-	return -1, "", "", "", fmt.Errorf("无可用 tun")
+	return -1, fmt.Errorf("暂无可用TUN网卡可分配")
 }
 
-func (m *Manager) genConfigDir(ip string) string {
-	return filepath.Join("/root/android-data", strings.ReplaceAll(ip, ".", "-"))
+// /root/android-data/aaa608ce34/system/proxy
+func (m *Manager) genConfigDir(name string) string {
+	return filepath.Join(baseDir, name, "system/proxy")
 }
 
-func (m *Manager) waitForTun(name string, timeout time.Duration) bool {
+func (m *Manager) waitForTun(index int, timeout time.Duration) bool {
 	start := time.Now()
 	for {
-		iface, err := net.InterfaceByName(name)
+		iface, err := net.InterfaceByName(fmt.Sprintf("tun%d", index))
 		if err == nil && iface != nil {
 			return true
 		}
 		if time.Since(start) > timeout {
 			return false
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 	}
 }
 
 func (m *Manager) writeConfig(task *Task) {
-	configDir := m.genConfigDir(task.IP)
-	_ = os.RemoveAll(configDir)
-	_ = os.MkdirAll(configDir, 0755)
-
-	path := filepath.Join(m.genConfigDir(task.IP), "config.yaml")
-
-	mixedPort := 7890 + task.TunIndex
-	dnsPort := 10053 + task.TunIndex
-
+	device := fmt.Sprintf("tun%d", task.TunIndex)
+	tableIndex := 2000 + task.TunIndex
+	ruleIndex := 9000 + task.TunIndex
+	dnsPort := 10000 + task.TunIndex
 	content := fmt.Sprintf(`
 mode: rule
 log-level: debug
 allow-lan: false
 find-process-mode: off
 ipv6: true
-authentication:
-  - "%v:%v"
 
 tun:
   enable: true
   stack: system
-  auto-route: false
-  auto-detect-interface: false
   device: %v
   mtu: %v
+  iproute2-table-index: %v
+  iproute2-rule-index: %v
+  auto-route: false
+  auto-detect-interface: false
+  strict-route: true
   dns-hijack: 
     - 0.0.0.0:%v
 
@@ -299,28 +262,24 @@ dns:
   prefer-h3: false
   listen: 0.0.0.0:%v
   enhanced-mode: fake-ip
-  fake-ip-range: 198.18.%v.1/16
+  fake-ip-range: 198.%v.0.1/16
   fake-ip-filter-mode: blacklist
   default-nameserver:
     - 114.114.114.114
     - 8.8.8.8
-    - tls://1.12.12.12:853
-    - tls://223.5.5.5:853
     - system
   nameserver:
     - 114.114.114.114
     - 8.8.8.8
-    - tls://1.12.12.12:853
-    - tls://223.5.5.5:853
     - system
 
 proxies:
-  - name: %v
+  - name: s5-%v
     type: socks5
     server: %v
     port: %v
-    username: %v
-    password: %v
+    username: "%v"
+    password: "%v"
     skip-cert-verify: true
     udp: true
 
@@ -328,89 +287,56 @@ proxy-groups:
   - name: all
     type: select
     proxies:
-      - %v
+      - s5-%v
 
 rules:
-  - IP-CIDR,192.168.0.0/16,DIRECT
-  - IP-CIDR,172.16.0.0/12,DIRECT
+  - DOMAIN-SUFFIX,localhost,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT
   - IP-CIDR,10.0.0.0/8,DIRECT
+  - IP-CIDR,172.16.0.0/12,DIRECT
+  - IP-CIDR,192.168.0.0/16,DIRECT
+  - IP-CIDR,114.114.114.114/32,DIRECT
+  - IP-CIDR,1.1.1.1/32,DIRECT
+  - IP-CIDR,223.5.5.5/32,DIRECT
+  - IP-CIDR,223.6.6.6/32,DIRECT
+  - IP-CIDR,192.168.3.122/32,DIRECT
   - MATCH,all
+`, device, 1480, tableIndex, ruleIndex, dnsPort, dnsPort, task.TunIndex, task.TunIndex, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TunIndex)
 
-`, task.Username, task.Password, task.TunName, task.Mtu, dnsPort, dnsPort, task.TunIndex, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TableName)
-
-	logger.Info("写入代理配置信息: mixedPort[%v], TunName[%v], Mtu[%v], Address[%v], Gateway[%v], dnsPort[%v], proxyName[%v], ProxyHost[%v], ProxyPort[%v], Username[%v], Password[%v]", mixedPort, task.TunName, task.Mtu, task.Address, task.Gateway, dnsPort, task.TableName, task.ProxyHost, task.ProxyPort, task.Username, task.Password)
-
-	_ = os.WriteFile(path, []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(m.genConfigDir(task.Name), "config.yaml"), []byte(content), 0777)
 }
 
 func (m *Manager) setupRoute(task *Task) {
-	tableLine := fmt.Sprintf("%v %s", 100+task.TunIndex, task.TableName)
-	data, err := os.ReadFile("/etc/iproute2/rt_tables")
-	if err == nil && !strings.Contains(string(data), tableLine) {
-		f, err := os.OpenFile("/etc/iproute2/rt_tables", os.O_APPEND|os.O_WRONLY, 0644)
-		if err == nil {
-			defer f.Close()
-			_, _ = f.WriteString(tableLine + "\n")
-			logger.Info("[+] 已添加路由表定义: %s", tableLine)
-		} else {
-			logger.Error("[-] 写入 rt_tables 失败: %v", err)
-		}
+	table := fmt.Sprintf("%v", 1000+task.TunIndex)
+	args := []string{"route", "replace", "default", "dev", fmt.Sprintf("tun%d", task.TunIndex), "table", table}
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		logger.Error("添加策略路由失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
 
-	logger.Info("添加路由策略: %v, %v, %v", task.IP, task.TunName, task.TableName)
-
-	if out, err := exec.Command("ip", "rule", "add", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-1: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "add", "default", "dev", task.TunName, "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("添加策略路由失败-2: %v, 输出: %s", err, string(out))
+	args = []string{"rule", "add", "from", task.IP, "lookup", table}
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		logger.Error("添加策略路由失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
 
-	if out, err := exec.Command("ip", "route", "flush", "cache").CombinedOutput(); err != nil {
-		logger.Error("刷新路由表: %v, 输出: %s", err, string(out))
-	}
+	logger.Info("[✔] 路由策略添加成功: %s", task.IP)
 }
 
 func (m *Manager) cleanupRoute(task *Task) {
-	// 删除规则和路由表项
-	if out, err := exec.Command("ip", "rule", "del", "from", task.IP, "lookup", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("清理策略路由失败: %v, 输出: %s", err, string(out))
-	}
-	if out, err := exec.Command("ip", "route", "flush", "table", task.TableName).CombinedOutput(); err != nil {
-		logger.Error("清理策略路由失败: %v, 输出: %s", err, string(out))
+	table := fmt.Sprintf("%v", 1000+task.TunIndex)
+	args := []string{"rule", "del", "from", task.IP, "lookup", table}
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		logger.Error("路由策略清理失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
 
-	logPath := filepath.Join("logs", fmt.Sprintf("mihomo_%s.log", strings.ReplaceAll(task.IP, ".", "-")))
-	logger.Warning("清理代理日志: %v", logPath)
-	_ = os.Remove(logPath)
-
-	// 打开文件
-	file, err := os.Open("/etc/iproute2/rt_tables")
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	// 创建 Scanner 按行读取
-	scanner := bufio.NewScanner(file)
-	content := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.Contains(line, task.TableName) {
-			content += line + "\n"
-		}
+	args = []string{"route", "flush", "table", table}
+	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
+		logger.Error("路由策略清理失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
 
-	_ = os.WriteFile("/etc/iproute2/rt_tables", []byte(content), 0644)
-
-	if out, err := exec.Command("ip", "route", "flush", "cache").CombinedOutput(); err != nil {
-		logger.Error("刷新路由表: %v, 输出: %s", err, string(out))
-	}
-
-	logger.Info("[x] 已清理策略路由: %s -> %s", task.IP, task.TableName)
+	logger.Info("[x] 已清理策略路由: %s", task.IP)
 }
 
-// 日志收集函数（带文件写入 + 内存限制）
+// 日志收集函数
 func (task *Task) collectLogs(pipe io.ReadCloser, file *os.File) {
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
@@ -425,6 +351,6 @@ func (task *Task) collectLogs(pipe io.ReadCloser, file *os.File) {
 		task.LogLock.Unlock()
 
 		// 写入文件
-		fmt.Fprintln(file, line)
+		_, _ = fmt.Fprintln(file, line)
 	}
 }
