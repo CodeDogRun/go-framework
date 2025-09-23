@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ type Task struct {
 	ProxyPort int
 	Username  string
 	Password  string
+	Filter    []string
 	TunIndex  int
 	Cmd       *exec.Cmd
 	Ctx       context.Context
@@ -60,7 +62,7 @@ func NewManager() *Manager {
 // user - 代理用户名
 // pass - 代理密码
 // timeoutSec - 自动关闭时间(秒)
-func (m *Manager) Start(name, ip, host string, port int, user, pass string, timeoutSec int64) error {
+func (m *Manager) Start(name, ip, host string, port int, user, pass string, filter []string, timeoutSec int64) error {
 	if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
 		logger.Error("[-] 无效的 IP 地址: %s（必须是合法 IPv4）", ip)
 		return errors.New("无效的IP地址: " + ip)
@@ -100,6 +102,7 @@ func (m *Manager) Start(name, ip, host string, port int, user, pass string, time
 		ProxyPort: port,
 		Username:  user,
 		Password:  pass,
+		Filter:    filter,
 		TunIndex:  tunIndex,
 		Ctx:       ctx,
 		Cancel:    cancel,
@@ -146,13 +149,13 @@ func (m *Manager) Start(name, ip, host string, port int, user, pass string, time
 	m.tasks[ip] = task
 
 	if !m.waitForTun(task.TunIndex, time.Millisecond*5000) {
-		logger.Error("[-] 等待 tun 设备 %s 超时，准备退出", task.TunIndex)
+		logger.Error("[-] 等待 tun 设备 %v 超时，准备退出", task.TunIndex)
 		m.Stop(task.IP)
 		return errors.New("等待TUN网卡创建超时")
 	}
 
 	m.setupRoute(task)
-	logger.Success("[+] 启动 mihomo [%s] 通过 %s:%d -> %s", ip, host, port, task.TunIndex)
+	logger.Success("[+] 启动 mihomo [%s] 通过 %s:%d -> %v", ip, host, port, task.TunIndex)
 	return nil
 }
 
@@ -237,6 +240,21 @@ func (m *Manager) writeConfig(task *Task) {
 	tableIndex := 2000 + task.TunIndex
 	ruleIndex := 9000 + task.TunIndex
 	dnsPort := 10000 + task.TunIndex
+	var rules []string
+	rules = append(rules, "  - DOMAIN-SUFFIX,localhost,DIRECT")
+	rules = append(rules, "  - IP-CIDR,127.0.0.0/8,DIRECT")
+	rules = append(rules, "  - IP-CIDR,10.0.0.0/8,DIRECT")
+	rules = append(rules, "  - IP-CIDR,172.16.0.0/12,DIRECT")
+	rules = append(rules, "  - IP-CIDR,192.168.0.0/16,DIRECT")
+	rules = append(rules, "  - IP-CIDR,114.114.114.114/32,DIRECT")
+	rules = append(rules, "  - IP-CIDR,1.1.1.1/32,DIRECT")
+	rules = append(rules, "  - IP-CIDR,223.5.5.5/32,DIRECT")
+	rules = append(rules, "  - IP-CIDR,223.6.6.6/32,DIRECT")
+	rules = append(rules, "  - IP-CIDR,192.168.3.122/32,DIRECT")
+	for i := range task.Filter {
+		rules = append(rules, "  - IP-CIDR,"+task.Filter[i]+",DIRECT")
+	}
+	rules = append(rules, "  - MATCH,all")
 	content := fmt.Sprintf(`
 allow-lan: false
 mode: rule
@@ -294,18 +312,8 @@ proxy-groups:
       - s5-%v
 
 rules:
-  - DOMAIN-SUFFIX,localhost,DIRECT
-  - IP-CIDR,127.0.0.0/8,DIRECT
-  - IP-CIDR,10.0.0.0/8,DIRECT
-  - IP-CIDR,172.16.0.0/12,DIRECT
-  - IP-CIDR,192.168.0.0/16,DIRECT
-  - IP-CIDR,114.114.114.114/32,DIRECT
-  - IP-CIDR,1.1.1.1/32,DIRECT
-  - IP-CIDR,223.5.5.5/32,DIRECT
-  - IP-CIDR,223.6.6.6/32,DIRECT
-  - IP-CIDR,192.168.3.122/32,DIRECT
-  - MATCH,all
-`, mark, device, 1480, tableIndex, ruleIndex, dnsPort, dnsPort, task.TunIndex, task.TunIndex, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TunIndex)
+%v
+`, mark, device, 1480, tableIndex, ruleIndex, dnsPort, dnsPort, task.TunIndex, task.TunIndex, task.ProxyHost, task.ProxyPort, task.Username, task.Password, task.TunIndex, strings.Join(rules, "\n"))
 
 	_ = os.WriteFile(filepath.Join(m.genConfigDir(task.Name), "config.yaml"), []byte(content), 0777)
 }
@@ -317,7 +325,7 @@ func (m *Manager) setupRoute(task *Task) {
 		logger.Error("添加策略路由失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
 
-	args = []string{"rule", "add", "from", task.IP, "lookup", table}
+	args = []string{"rule", "add", "pref", "1", "from", task.IP, "lookup", table}
 	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
 		logger.Error("添加策略路由失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
@@ -327,7 +335,7 @@ func (m *Manager) setupRoute(task *Task) {
 
 func (m *Manager) cleanupRoute(task *Task) {
 	table := fmt.Sprintf("%v", 1000+task.TunIndex)
-	args := []string{"rule", "del", "from", task.IP, "lookup", table}
+	args := []string{"rule", "del", "pref", "1", "from", task.IP, "lookup", table}
 	if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
 		logger.Error("路由策略清理失败[%v]: %v, 输出: %s", args, err, string(out))
 	}
