@@ -101,7 +101,7 @@ func Connect(node ...string) *gorm.DB {
 		panic("尚未创建数据库连接, 请检查配置文件！")
 	}
 
-	key := keys[0]
+	key := "master"
 	if len(node) > 0 && len(node[0]) > 0 {
 		key = node[0]
 	}

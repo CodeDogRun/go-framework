@@ -44,7 +44,7 @@ func Connect(node ...string) *Chain {
 		panic("尚未创建Redis连接, 请检查配置文件！")
 	}
 
-	key := keys[0]
+	key := "master"
 	if len(node) > 0 {
 		key = node[0]
 	}
